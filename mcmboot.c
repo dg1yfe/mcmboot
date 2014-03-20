@@ -8,10 +8,12 @@
 
 #include <stdlib.h>
 #include <stdint.h>
+#include <string.h>
 #include <avr/io.h>
 #include <avr/interrupt.h>
 #include <avr/boot.h>
 #include <util/delay.h>
+#include <avr/pgmspace.h>
 
 #define UART_BAUD 19200L
 
@@ -38,10 +40,14 @@ uint8_t wbuf_wp;
 uint8_t wbuf_rp;
 uint8_t wbuf_count;
 
+uint16_t errorAtAddress = 0;
+
 uint8_t doBoot = 0;
+char cBuf[8];
 
 
-enum { IDLE=0, READ, WRITE, PARSE, CHECK, PROG };
+enum { IDLE=0, PROMPT, PROGRAM, VERIFY, READ, BOOT };
+enum { PROCESSING=0, PROGDONE, CHECKSUMERROR, FLASHERROR };
 
 uint8_t blState = 0;
 uint8_t nextState = 0;
@@ -61,14 +67,99 @@ struct S_PAGE{
 	uint8_t  startAddress;
 	uint16_t current;
 	uint8_t  wp;
+	uint16_t flashAddress;
 } sPage;
+/*
 
+	PGM Pin checken, wenn nicht aktiv, dann booten
+	sonst:
+	Prompt ausgeben (p/e/v)
+	Auf HEX File warten
+
+*/
 
 void boot_program_page (uint32_t page, uint16_t *buf);
+uint8_t programPage (struct S_PAGE * p);
+uint8_t iHexParser(uint8_t c);
+char getChar( );
+void putChar(char c);
+void putStrP(const char * c );
+
+void (*start)( void ) = 0x0000;        /* Funktionspointer auf 0x0000 */
 
 int main(void) __attribute__((noreturn));
 int main(void)
 {
+// configure io Pins
+	/*  Port A:
+	 *  Bit 0-2 : PL Encode
+	 *  Bit 3	: F1 / #F2  (Input from Control Panel, parallel to SCI RX)
+	 *  Bit 4-5 : n.c.
+	 *  Bit 6	: HUB
+	 *  Bit 7	: Test
+	 */
+	DDRA  = (0 << 3) | (1 << 2) | (1 << 1) | (1 << 0);
+	PORTA = (1 << 2);
+
+	/* Port B:
+	 * Bit 0	: CSQ/UNSQ (Input from Control Panel)
+	 * Bit 1-3  : SPI (SCK,MOSI,MISO)
+	 * Bit 4	: Alert Tone (OC0) (default = 0 -> used by HW as programmable Pull-Up for /NMI (INT4) input)
+	 * Bit 5	: Data Inhibit (clamp Signal Decode Input to GND)
+	 * Bit 6	: Tx/Busy (Control Head Reset)
+	 * Bit 7	: Syn_Latch
+	 */
+	DDRB  = (1 << 4) | ( 1 << 5 ) | ( 0 << 6) | ( 1 << 7 );
+	PORTB = (0 << 4);
+
+	/* Port C:
+	 * Bit 0 - 3 : SEL_ENC (4-Bit DAC / Sel Call)
+	 * Bit 4 - 7 : n.c.
+	 */
+	DDRC  = 0x0f;
+	PORTC = 3;
+
+	/*
+	 * Port D:
+	 * Bit 0	: SWB+
+	 * Bit 1	: PTT (input)
+	 * Bit 2-3	: UART1
+	 * Bit 4	: Signalling Decode (IC1)
+	 * Bit 5	: Clock
+	 * Bit 6	: Data out
+	 * Bit 7	: DPTT
+	 */
+	// leave Bit 6 low & input
+	// only use PORTE2 as data i/o
+	DDRD  = ( 1 << 5) | ( 0 << 6 ) | ( 1 << 7 );
+	PORTD = ( 0 << 5) | ( 0 << 6);
+
+	/*
+	 * Port E:
+	 * Bit 0-1	: UART0 (SCI to Control Head)
+	 * Bit 2	: Data In
+	 * Bit 3	: Call LED
+	 * Bit 4	: #NMI  (INT4)
+	 * Bit 5	: #STBY (INT5)
+	 * Bit 6	: Lock Detect (INT6)    ( 1 = Lock )
+	 * Bit 7	: Squelch Detect (INT7) ( 1 = Signal)
+	 */
+
+	DDRE  = ( 1 << 3 );
+	PORTE = ( 1 << 0);
+
+	/*
+	 * Port G:
+	 * Bit 0	: Call SW
+	 * Bit 1	: Emergency
+	 * Bit 2	: n.c.
+	 * Bit 3	: SR Latch
+	 * Bit 4	: #Mem enable
+	 */
+
+	PORTG = (1 << 4);
+	DDRG  = (1 << 3) | (1 << 4);
+
 // configure UART and check communication    
 
 	UBRR0H = UART_HIDIV;
@@ -94,13 +185,20 @@ int main(void)
 	memset(sPage.buffer, 0xff , sizeof sPage.buffer);
 	
 	blState = IDLE;
-#if F_CPU
+//#if F_CPU
 	TCCR1B = (( 1 << CS12 ) | (1 << CS10));		// Prescaler 1024
 	TCNT1  = 0;
 	
 	// check HUB/PGM input - use PGM to indicate programmer presence
+	// HUB/PGM = GND -> indicate HUB
+	// HUB/PGM = +5V -> indicate Programming request
+	// "/NMI" is used with original CPU to indicate programming request
+	// "/NMI" is mapped to Port E4 (INT 4)
+	
+	doBoot = PINE & (1 << PINE4);	// read /PGM input
 	while(!doBoot)
     {		
+		doBoot = PINE & (1 << PINE4);	// read /PGM input
 		// if UART Tx Buf is empty and there is something to send
 		if((UCSR0A & (1<<UDRE0) && wbuf_count)){
 			UDR0 = wbuf_data[wbuf_rp];
@@ -124,39 +222,63 @@ int main(void)
 		}
 		
 		switch(blState){
-			case IDLE:
-				if (getChar() == "m"){
-					blState = WAITFORSYNC;
-					TCNT1  = 0;
-				}
-				break;
-			case WAITFORSYNC:
-				if (lastCharValid){
-					if(getChar() == "c"){
-						nextState = HEX1;
-						blState = GETBYTE;
-						putStrP(PSTR("mcMega Bootloader v14_1.\r\nWaiting 10 seconds for Hex File...\r\n"));
-						TCNT1  = -(TICKSTOWAIT*100);
+			case PROMPT:
+				blState = IDLE;
+				putStrP(PSTR("mcMega Bootloader v14_1 (dg1yfe / 2014).\r\ne - Erase\r\np - Program\r\nv - Verify\r\nb - Boot\r\n"));
+				break;				
+			case IDLE:{
+				char c;
+				if((c = getChar())){
+					if( c == 'p'){
+						blState = PROGRAM;						
 					}
-					else{
-						blState = IDLE;
+					else
+					if( c == 'v'){
+						blState = VERIFY;
 					}
-				}				
-				break;
-			case GETCHAR:
-				if (lastCharValid){
-					TCNT1   = 0;					
-					blState = nextState;
+					else
+					if (c == 'r'){
+						blState = READ;
+					}
+					if( (c == 'p') || (c == 'v') ){
+						putStrP(PSTR("Send Hex File... (ESC to abort)\r\n"));
+					}						
 				}
 				break;
-			case GETBYTE:
-				if (lastCharValid){
-					TCNT1   = 0;
-					blState = nextState;
+			}			
+			case PROGRAM:{
+				char c;
+				if((c = getChar())){
+					uint8_t err;
+					if(c==0x1b){
+						putStrP(PSTR("ESC\r\n"));
+						blState = PROMPT;
+					}
+					err = iHexParser(c);
+					if(err == FLASHERROR){
+						uint8_t i=0;
+						putStrP(PSTR("Error programming page at 0x"));
+						memset(cBuf,0,sizeof cBuf);
+						itoa(errorAtAddress, cBuf, 16);
+						while(cBuf[i]){
+							putChar(cBuf[i]);
+						}
+						putStrP(PSTR(".\r\n"));
+					}
+					if(err == PROGDONE){
+						putChar('+');
+					}
 				}
+				break;
+			}			
+			case READ:
+				break;
+			case BOOT:
+				doBoot = 1;
 				break;
 		}
     }
+	start();
 }
 
 
@@ -198,6 +320,7 @@ uint8_t iHexParser(uint8_t c){
 	static uint8_t cbuf[5];
 	static uint8_t HexParserState=START;
 	static uint8_t nextHexParserState=START;
+	uint8_t rval = PROCESSING;
 	
 	switch(HexParserState){
 		case START:
@@ -212,30 +335,35 @@ uint8_t iHexParser(uint8_t c){
 			}			
 		break;
 		case BYTECOUNT:
-			sHexLine.bytecount = atoi(cbuf);		// parse hex value from buffer
+			sHexLine.bytecount = (uint8_t) atoi((const char *)cbuf);		// parse hex value from buffer
 			sHexLine.checksum = sHexLine.bytecount;	// initialize checksum
 			HexParserState = BUFFER4;				// read 4 chars into buffer
 			nextHexParserState = ADDRESS;			// then parse it as address
 		break;
 		case ADDRESS:
-			sHexLine.address = atoi(cbuf);			// get address value
+			sHexLine.address = (uint16_t) atoi((const char *)cbuf);			// get address value
 			sHexLine.checksum += (sHexLine.bytecount & 0xff);	// add to checksum
 			sHexLine.checksum += (sHexLine.bytecount >> 8);
 													// check if address is outside our current flash page
-			if((sHexLine.address & 0xff00 != sPage.current) || !sPage.count){
+			if(((sHexLine.address & 0xff00) != sPage.current) || !sPage.count){
 				if (sPage.count){					// if it is not the first page to be processed
-					programPage(&sPage);			// and it is outside, program page buffer to flash					
+					errorAtAddress = 0;
+					if((rval = programPage(&sPage))!=PROGDONE){// and it is outside, program page buffer to flash
+						rval = FLASHERROR;
+						errorAtAddress = sPage.current;
+					}
 				}
 				sPage.current = sHexLine.address & 0xff00;	// set address of new page
 				sPage.startAddress = (uint8_t) sHexLine.address;	
 				sPage.wp = (uint8_t) sHexLine.address;
+				sPage.flashAddress = sHexLine.address;
 			}			
 			nextHexParserState = RECORDTYPE;
 			HexParserState = BUFFER2;
 		break;
 		case RECORDTYPE:
-			sHexLine.recordType = atoi(cbuf);
-			sHexLine.checksum += atoi(cbuf);
+			sHexLine.recordType = (uint8_t) atoi((const char *)cbuf);
+			sHexLine.checksum += (uint8_t) atoi((const char *)cbuf);
 
 			if(sHexLine.recordType==0){
 				if(sHexLine.bytecount){
@@ -254,14 +382,14 @@ uint8_t iHexParser(uint8_t c){
 		break;
 		case DATA:
 			HexParserState = BUFFER2;
-			sHexLine.data[sHexLine.data_ptr++] = atoi(cbuf);
-			sHexLine.checksum += atoi(cbuf);
+			sHexLine.data[sHexLine.data_ptr++] = (uint8_t) atoi((const char *)cbuf);
+			sHexLine.checksum += (uint8_t) atoi((const char *)cbuf);
 			if(sHexLine.data_ptr == sHexLine.bytecount){
 				nextHexParserState = CHECKSUM;				
 			}						
 		break;
 		case CHECKSUM:
-			sHexLine.checksum += atoi(cbuf);
+			sHexLine.checksum += (uint8_t) atoi((const char *) cbuf);
 			if(sHexLine.checksum){
 				HexParserState = CHECKERROR;
 			}
@@ -305,16 +433,17 @@ uint8_t iHexParser(uint8_t c){
 				HexParserState=ERROR;
 		break;
 		case CHECKERROR:
-		
+			return CHECKSUMERROR;
 		break;
 		case ERROR:		
 		break;
-	}		
+	}
+	return rval;
 }
 
 
 
-uint8_t getChar( ){
+char getChar( ){
 	uint8_t c = 0;
 	if(rbuf_count)
 	{
@@ -326,7 +455,7 @@ uint8_t getChar( ){
 }	
 
 
-void putChar(uint8_t c){
+void putChar(char c){
 	if(wbuf_count < WBUFSIZE){
 		wbuf_data[wbuf_wp++] = c;
 		wbuf_wp &= WBUFMASK;
@@ -335,16 +464,15 @@ void putChar(uint8_t c){
 }
 
 
-void putStrP(uint8_t * c ){
+void putStrP(const char * c ){
 	while(*c){
 		putChar(pgm_read_byte(*c++));
 	}
-	return 0;
 }
 
 
 
-void programPage (struct S_PAGE * p)
+uint8_t programPage (struct S_PAGE * p)
 {
 	uint8_t i;
 	uint16_t * buf;
@@ -364,5 +492,18 @@ void programPage (struct S_PAGE * p)
 	// to the application after bootloading.
 	boot_rww_enable ();
 	p->count = 0;
+	
+	// Verify memory content
+	buf = (uint16_t *) p->buffer;	
+	for (i=0; i<SPM_PAGESIZE; i+=2){
+		uint16_t b;
+		b=pgm_read_word(p->current + i);
+		if(b != *buf++)
+			break;
+	}
 	memset(p->buffer,0xff,sizeof p->buffer);
+	if(i<SPM_PAGESIZE)
+		return FLASHERROR;
+	else
+		return PROGDONE;
 }
