@@ -33,7 +33,7 @@ uint8_t lastChar;
 uint8_t lastCharValid;
 uint8_t lastCharRead;
 
-#define WBUFSIZE 64	// valid sizes have to be a power of 2 (2^x - eg. 2,4,8,...)
+#define WBUFSIZE 128	// valid sizes have to be a power of 2 (2^x - eg. 2,4,8,...)
 #define WBUFMASK (WBUFSIZE-1)
 uint8_t wbuf_data[WBUFSIZE];
 uint8_t wbuf_wp;
@@ -43,13 +43,12 @@ uint8_t wbuf_count;
 uint16_t errorAtAddress = 0;
 
 uint8_t doBoot = 0;
-char cBuf[8];
 
 
 enum { IDLE=0, PROMPT, PROGRAM, VERIFY, READ, BOOT };
 enum { PROCESSING=0, PROGDONE, CHECKSUMERROR, FLASHERROR };
 
-uint8_t blState = 0;
+uint8_t blState = PROMPT;
 uint8_t nextState = 0;
 
 struct {
@@ -90,6 +89,8 @@ void (*start)( void ) = 0x0000;        /* Funktionspointer auf 0x0000 */
 int main(void) __attribute__((noreturn));
 int main(void)
 {
+	char cBuf[8];
+
 // configure io Pins
 	/*  Port A:
 	 *  Bit 0-2 : PL Encode
@@ -145,7 +146,7 @@ int main(void)
 	 * Bit 7	: Squelch Detect (INT7) ( 1 = Signal)
 	 */
 
-	DDRE  = ( 1 << 3 );
+	DDRE  = ( 1 << 3 ) | ( 1 << 0);
 	PORTE = ( 1 << 0);
 
 	/*
@@ -165,16 +166,17 @@ int main(void)
 	UBRR0H = UART_HIDIV;
 	UBRR0L = UART_LODIV;	// ca 1202 Bit / s
 
-	/* Set frame format: 7data, odd parity, 1stop bit */
-	UCSR0C = (1 << UPM01) |
-			 (1 << UPM00) |
+	/* Set frame format: 8 data, no parity, 1 stop bit */
+	UCSR0C = (0 << UPM01) |
+			 (0 << UPM00) |
 			 (0 << USBS0) |
 			 (1 << UCSZ01)|
-			 (0 << UCSZ00);
+			 (1 << UCSZ00);
 
 	/* Enable receiver and transmitter
 	 * Disable RX interrupt */
 	UCSR0B = (0 << RXCIE0) | (1<<RXEN0)|(1<<TXEN0);
+	
 	rbuf_wp = 0;
 	rbuf_rp = 0;
 	rbuf_count = 0;
@@ -184,7 +186,7 @@ int main(void)
 	sPage.wp = 0;
 	memset(sPage.buffer, 0xff , sizeof sPage.buffer);
 	
-	blState = IDLE;
+	blState = PROMPT;
 //#if F_CPU
 	TCCR1B = (( 1 << CS12 ) | (1 << CS10));		// Prescaler 1024
 	TCNT1  = 0;
@@ -261,7 +263,7 @@ int main(void)
 						memset(cBuf,0,sizeof cBuf);
 						itoa(errorAtAddress, cBuf, 16);
 						while(cBuf[i]){
-							putChar(cBuf[i]);
+							putChar(cBuf[i++]);
 						}
 						putStrP(PSTR(".\r\n"));
 					}
@@ -271,6 +273,8 @@ int main(void)
 				}
 				break;
 			}			
+			case VERIFY:
+				break;
 			case READ:
 				break;
 			case BOOT:
@@ -317,10 +321,40 @@ enum {START, BYTECOUNT, ADDRESS, RECORDTYPE, DATA, CHECKSUM, TERMINATE, CHECKERR
 
 uint8_t iHexParser(uint8_t c){
 	static uint8_t count=0;
-	static uint8_t cbuf[5];
+	static uint8_t cbuf[6];
 	static uint8_t HexParserState=START;
 	static uint8_t nextHexParserState=START;
 	uint8_t rval = PROCESSING;
+	uint8_t i;
+		
+	if(c == 0x1b)
+	{
+		HexParserState=START;
+		return PROCESSING;
+	}
+	
+	switch(HexParserState){
+		case BUFFER2:
+		case BUFFER4:
+			if (HexParserState == BUFFER2)
+				count = 2;
+			else
+				count = 4;
+				memset(cbuf,'0',sizeof cbuf);
+				HexParserState = BUFFER;
+			case BUFFER:
+			if(count){
+				cbuf[sizeof cbuf - count]=c;
+				if(--count==0){
+					HexParserState=nextHexParserState;
+				}
+			}
+			else
+				HexParserState=ERROR;
+			break;
+		default:
+			break;		
+	}
 	
 	switch(HexParserState){
 		case START:
@@ -335,15 +369,15 @@ uint8_t iHexParser(uint8_t c){
 			}			
 		break;
 		case BYTECOUNT:
-			sHexLine.bytecount = (uint8_t) atoi((const char *)cbuf);		// parse hex value from buffer
+			sHexLine.bytecount = (uint8_t) strtoul((const char *)cbuf,0,16);		// parse hex value from buffer
 			sHexLine.checksum = sHexLine.bytecount;	// initialize checksum
 			HexParserState = BUFFER4;				// read 4 chars into buffer
 			nextHexParserState = ADDRESS;			// then parse it as address
 		break;
 		case ADDRESS:
-			sHexLine.address = (uint16_t) atoi((const char *)cbuf);			// get address value
-			sHexLine.checksum += (sHexLine.bytecount & 0xff);	// add to checksum
-			sHexLine.checksum += (sHexLine.bytecount >> 8);
+			sHexLine.address = (uint16_t) strtoul((const char *)cbuf,0,16);			// get address value
+			sHexLine.checksum += (sHexLine.address & 0xff);	// add to checksum
+			sHexLine.checksum += (sHexLine.address >> 8);
 													// check if address is outside our current flash page
 			if(((sHexLine.address & 0xff00) != sPage.current) || !sPage.count){
 				if (sPage.count){					// if it is not the first page to be processed
@@ -362,8 +396,8 @@ uint8_t iHexParser(uint8_t c){
 			HexParserState = BUFFER2;
 		break;
 		case RECORDTYPE:
-			sHexLine.recordType = (uint8_t) atoi((const char *)cbuf);
-			sHexLine.checksum += (uint8_t) atoi((const char *)cbuf);
+			sHexLine.recordType = (uint8_t) strtoul((const char *)cbuf,0,16);
+			sHexLine.checksum += sHexLine.recordType;
 
 			if(sHexLine.recordType==0){
 				if(sHexLine.bytecount){
@@ -382,14 +416,14 @@ uint8_t iHexParser(uint8_t c){
 		break;
 		case DATA:
 			HexParserState = BUFFER2;
-			sHexLine.data[sHexLine.data_ptr++] = (uint8_t) atoi((const char *)cbuf);
-			sHexLine.checksum += (uint8_t) atoi((const char *)cbuf);
+			sHexLine.data[sHexLine.data_ptr] = (uint8_t) strtoul((const char *)cbuf,0,16);
+			sHexLine.checksum += sHexLine.data[sHexLine.data_ptr++];
 			if(sHexLine.data_ptr == sHexLine.bytecount){
 				nextHexParserState = CHECKSUM;				
 			}						
-		break;
+			break;
 		case CHECKSUM:
-			sHexLine.checksum += (uint8_t) atoi((const char *) cbuf);
+			sHexLine.checksum += (uint8_t) strtoul((const char *)cbuf,0,16);
 			if(sHexLine.checksum){
 				HexParserState = CHECKERROR;
 			}
@@ -403,40 +437,27 @@ uint8_t iHexParser(uint8_t c){
 					if(sPage.wp == 0){
 						programPage(&sPage);
 					}
-				}				
+				}
 				HexParserState = START;
 			}
 		break;
 		case TERMINATE:
-		break;
-		case BUFFER2:
-			count = 2;
-			memset(cbuf,0,sizeof cbuf);
-			HexParserState = BUFFER;
-			break;
-		case BUFFER4:
-			count = 4;
-			memset(cbuf,0,sizeof cbuf);
-			HexParserState = BUFFER;
-			break;
-		case BUFFER:
-			if(count--){
-				cbuf[3]=cbuf[2];
-				cbuf[2]=cbuf[1];
-				cbuf[1]=cbuf[0];
-				cbuf[0]=c;
-				if(count==0){
-					HexParserState=nextHexParserState;
+			// reached end of file, program last page if there is some data in the buffer
+			if(sPage.wp != 0){
+				errorAtAddress = 0;
+				if((rval = programPage(&sPage))!=PROGDONE){// and it is outside, program page buffer to flash
+					rval = FLASHERROR;
+					errorAtAddress = sPage.current;
 				}
-			}
-			else
-				HexParserState=ERROR;
+			}				
 		break;
 		case CHECKERROR:
 			return CHECKSUMERROR;
 		break;
 		case ERROR:		
-		break;
+			break;
+		default:
+			break;
 	}
 	return rval;
 }
@@ -464,9 +485,10 @@ void putChar(char c){
 }
 
 
-void putStrP(const char * c ){
-	while(*c){
-		putChar(pgm_read_byte(*c++));
+void putStrP(const char * s ){
+	char c;
+	while((c = pgm_read_byte(s++))){
+		putChar(c);
 	}
 }
 
@@ -481,7 +503,7 @@ uint8_t programPage (struct S_PAGE * p)
 	boot_page_erase (p->current);
 	boot_spm_busy_wait ();      // Wait until the memory is erased.
 
-	for (i=0; i<SPM_PAGESIZE; i+=2){
+	for (i=0; i; i+=2){
 		boot_page_fill (p->current + i, *buf++);
 	}
 
