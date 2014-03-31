@@ -48,14 +48,20 @@ uint16_t errorAtAddress = 0;
 uint8_t doBoot = 0;
 
 
-enum { IDLE=0, PROMPT, PROGRAM, VERIFY, READ, ERASE_PMEM, BOOT };
-enum { OK=0, PROCESSING, PROGDONE, CHECKSUMERROR, FLASHERROR, VERIFYERROR };
+enum { IDLE=0, WAITPROMPT, PROMPT, PROGRAM, VERIFY, READ, PROCESSHEXDATA, PROGRAM_PAGE_EOF, VERIFY_PAGE_EOF, PROGRAM_PAGE, VERIFY_PAGE,
+		PROG_DONE, VERIFY_DONE, ERASE_PMEM, BOOT };
+	
+enum { OK=0, PROCESSING, CHECKSUMERROR, FLASHERROR, VERIFYERROR, PROG_PAGE, EOF };
+		
+enum { IHEX_DATA_RECORD=0, IHEX_EOF_RECORD};
 
+uint8_t mode = PROGRAM;
 uint8_t blState = PROMPT;
-uint8_t nextState = 0;
+uint8_t wait = 0;
 
 struct {
 	uint8_t		bytecount;
+	uint8_t		offset;
 	uint16_t	address;
 	uint8_t		recordType;
 	uint8_t		checksum;
@@ -82,15 +88,15 @@ struct S_PAGE{
 
 void boot_program_page (uint32_t page, uint16_t *buf);
 
-uint8_t programPage (struct S_PAGE * p);
-uint8_t verifyPage (struct S_PAGE * p)
+void programPageBegin(struct S_PAGE * p);
+uint8_t programPageVerify (struct S_PAGE * p);
+uint8_t verifyPage (struct S_PAGE * p);
 
 uint8_t iHexParser(uint8_t c);
 char getChar( );
 void putChar(char c);
 void putStrP(const char * c );
 
-uint8_t (*processData) ( struct S_PAGE * p) = &(programPage());
 void (*start)( void ) = 0x0000;        /* Funktionspointer auf 0x0000 */
 
 int main(void) __attribute__((noreturn));
@@ -231,9 +237,15 @@ int main(void)
 		}
 		
 		switch(blState){
+			case WAITPROMPT:
+				if(--wait)
+				{
+					_delay_ms(1);
+					break;
+				}				
 			case PROMPT:
 				blState = IDLE;
-				putStrP(PSTR("\r\nmcMega Bootloader v14_1 (dg1yfe / 2014).\r\ne - Erase\r\np - Program\r\nv - Verify\r\nb - Boot\r\n"));
+				putStrP(PSTR("\r\nmcMega Bootloader v14_1 (dg1yfe / 2014).\r\nR - Erase\r\np - Program\r\nv - Verify\r\nb - Boot\r\n"));
 				break;				
 			case IDLE:{
 				char c;
@@ -246,7 +258,7 @@ int main(void)
 						blState = VERIFY;
 					}
 					else
-					if( c == 'e'){
+					if( c == 'R'){
 						putStrP(PSTR("\r\nErasing Program Memory...\r\n"));
 						blState = ERASE_PMEM;
 					}
@@ -261,14 +273,15 @@ int main(void)
 				break;
 			}			
 			case PROGRAM:
-				*processData = &(programPage());
+				mode = PROGRAM;
 				blState=PROCESSHEXDATA;
 				break;
 			case VERIFY:
-				*processData = &(verifyPage());
+				mode = VERIFY;
 				blState=PROCESSHEXDATA;
 				break;
-			case PROCESSHEXDATA:{
+			case PROCESSHEXDATA:
+			{
 				char c;
 				if((c = getChar())){
 					uint8_t err;
@@ -277,37 +290,91 @@ int main(void)
 						blState = PROMPT;
 					}
 					err = iHexParser(c);
-					if(err == ERROR){
-						uint8_t i=0;
-						putStrP(PSTR("\r\nError at address 0x"));
-						memset(cBuf,0,sizeof cBuf);
-						itoa(errorAtAddress, cBuf, 16);
-						while(cBuf[i]){
-							putChar(cBuf[i++]);
-						}
-						putStrP(PSTR(".\r\n\r\n"));
-						blState = PROMPT;
+					
+					if(err == PROG_PAGE){
+						if(mode==VERIFY)						
+							blState = VERIFY_PAGE;
+						else
+							blState = PROGRAM_PAGE;
 					}
-					if(err == PROGOK){
-						putChar('+');
-					}else
-					if(err == PROGDONE){
-						putStrP(PSTR("\r\nFlash programmed.\r\n"));						
-						blState = PROMPT;
-					}else
-					if(err == VERIFYDONE){
-						putStrP(PSTR("\r\nData successfully verified.\r\n"));						
-						blState = PROMPT;
-					}					
+					else
+					if(err==EOF){
+						if (sPage.wp){
+							if(mode==VERIFY)
+								blState = VERIFY_PAGE_EOF;
+							else
+								blState = PROGRAM_PAGE_EOF;
+						}
+						else{
+							blState = PROG_DONE;						
+						}
+					}
 				}
 				break;
-			}			
+			}
+			case PROGRAM_PAGE_EOF:			
+			case PROGRAM_PAGE:
+				if (boot_spm_busy())
+					break;
+					
+				programPageBegin(&sPage);
+				
+				if(blState == PROGRAM_PAGE)
+					blState = VERIFY_PAGE;
+				else
+					blState = VERIFY_PAGE_EOF;
+				break;
+			case VERIFY_PAGE_EOF:
+			case VERIFY_PAGE:
+				if (boot_spm_busy())
+					break;
+				errorAtAddress = 0;
+				
+				if(programPageVerify(&sPage) != OK){
+					uint8_t i=0;
+					putStrP(PSTR("\r\nVerify error at address 0x"));
+					memset(cBuf,0,sizeof cBuf);
+					itoa(sPage.current, cBuf, 16);
+					putStr(cBuf);
+					putStrP(PSTR(".\r\n"));
+					wait=100;
+					blState = WAITPROMPT;
+					break;
+				}
+				else
+				{					
+					putStrP(PSTR("0x"));
+					memset(cBuf,0,sizeof cBuf);
+					itoa(sPage.current, cBuf, 16);
+					putStr(cBuf);
+					putStrP(PSTR(" Ok\r\n"));
+				}
+				
+				if(blState==VERIFY_PAGE_EOF)
+				{
+					blState = PROG_DONE;
+				}
+				else{
+					blState = PROCESSHEXDATA;					
+				}
+				break;
+			case PROG_DONE:
+				putStrP(PSTR("\r\nProg & Verify ok.\r\n"));
+				wait=100;
+				blState = WAITPROMPT;
+				break;
+			case VERIFY_DONE:
+				putStrP(PSTR("\r\nData successfully verified.\r\n"));
+				wait=100;
+				blState = WAITPROMPT;
+				break;
 			case READ:
 				break;
 			case ERASE_PMEM:
 				eraseProgramMemory();
 				putStrP(PSTR("...done\r\n"));
-				blState=PROMPT;
+				wait=50;
+				blState=WAITPROMPT;
 				break;
 			case BOOT:
 				doBoot = 1;
@@ -349,7 +416,7 @@ int main(void)
 //;
 //
 
-enum {START, BYTECOUNT, ADDRESS, RECORDTYPE, DATA, CHECKSUM, TERMINATE, CHECKERROR, ERROR, BUFFER, BUFFER2, BUFFER4};
+enum {START, BYTECOUNT, ADDRESS, RECORDTYPE, DATA, DATA_TO_PAGE, CHECKSUM, TERMINATE, ERROR, BUFFER, BUFFER2, BUFFER4};
 
 uint8_t iHexParser(uint8_t c){
 	static uint8_t count=0;
@@ -393,6 +460,7 @@ uint8_t iHexParser(uint8_t c){
 			if (c==':'){
 				sHexLine.address=0;
 				sHexLine.bytecount=0;
+				sHexLine.offset=0;
 				sHexLine.checksum=0;
 				sHexLine.recordType=0;
 
@@ -413,16 +481,9 @@ uint8_t iHexParser(uint8_t c){
 													// check if address is outside our current flash page
 			if(((sHexLine.address & 0xff00) != sPage.current) || !sPage.count){
 				if (sPage.count){					// if it is not the first page to be processed
-					errorAtAddress = 0;
-					if((rval = programPage(&sPage))!=PROGOK){// and it is outside, program page buffer to flash
-						rval = FLASHERROR;
-						errorAtAddress = sPage.current;
-					}
+													// and it is outside, program page buffer to flash
+					rval = PROG_PAGE;
 				}
-				sPage.current = sHexLine.address & 0xff00;	// set address of new page
-				sPage.startAddress = (uint8_t) sHexLine.address;	
-				sPage.wp = (uint8_t) sHexLine.address;
-				sPage.flashAddress = sHexLine.address;
 			}			
 			nextHexParserState = RECORDTYPE;
 			HexParserState = BUFFER2;
@@ -457,52 +518,48 @@ uint8_t iHexParser(uint8_t c){
 		case CHECKSUM:
 			sHexLine.checksum += (uint8_t) strtoul((const char *)cbuf,0,16);
 			if(sHexLine.checksum){
-				HexParserState = CHECKERROR;
+				HexParserState = START;
+				rval = CHECKSUMERROR;
+				break;
 			}
 			else{
+				uint8_t i;
 				// Checksum ok, copy line data to page buffer
 				// if page buffer is full, program page
-				uint8_t i;
-				for(i=0;i<sHexLine.bytecount;i++){
-					sPage.buffer[sPage.wp++] = sHexLine.data[i];
-					sPage.count++;
-					if(sPage.wp == 0){
-						if((rval = programPage(&sPage))!=PROGOK){
-							rval = FLASHERROR;
-							errorAtAddress = sPage.current;
-						}
-					}
-				}
+				sPage.current = sHexLine.address & 0xff00;	// set address of new page
+				sPage.startAddress = (uint8_t) sHexLine.address;
+				sPage.wp = (uint8_t) sHexLine.address;
+				sPage.flashAddress = sHexLine.address;
+				// continue in state DATA_TO_PAGE
+			}
+		case DATA_TO_PAGE:
+			i=sHexLine.offset;
+			while(i<sHexLine.bytecount && ((sPage.wp) || (!sPage.count))){
+				sPage.buffer[sPage.wp++] = sHexLine.data[i];
+				i++;
+			}
+			if(!sPage.wp){
+				sPage.count++;
+				sHexLine.offset = i;
+				rval = PROG_PAGE;				// program page
+			}
+			if(i<sHexLine.bytecount){
+				HexParserState = DATA_TO_PAGE;	// return to this state to copy remaining bytes
+			}
+			else{
 				HexParserState = START;
 			}
-		break;
+			break;
 		case TERMINATE:
 			sHexLine.checksum += (uint8_t) strtoul((const char *)cbuf,0,16);
 			if(sHexLine.checksum){
-				HexParserState = CHECKERROR;
+				rval = CHECKSUMERROR;
 			}
 			else{
-				// reached end of file, program last page if there is some data in the buffer
-				if(sPage.wp != 0){
-					errorAtAddress = 0;
-					if((rval = programPage(&sPage))!=PROGOK){// and it is outside, program page buffer to flash
-						rval = FLASHERROR;
-						errorAtAddress = sPage.current;
-					}
-					else{
-						rval = PROGDONE;
-					}
-				}
-				else{
-					rval = PROGDONE;					
-				}
+				rval = EOF;
 			}
 			HexParserState = START;
-		break;
-		case CHECKERROR:
-			HexParserState = START;
-			return CHECKSUMERROR;
-		break;
+			break;
 		case ERROR:		
 			break;
 		default:
@@ -548,29 +605,30 @@ void putStr(char * s ){
 }
 
 
-
-uint8_t programPage (struct S_PAGE * p)
+void programPageBegin(struct S_PAGE * p)
 {
 	uint16_t i;
 	uint16_t * buf;
 
 	buf = (uint16_t *) p->buffer;
 //	boot_page_erase (p->current);
-	boot_spm_busy_wait ();      // Wait until the memory is erased.
-
 	for (i=0; i<SPM_PAGESIZE; i+=2){
 		boot_page_fill (p->current + i, *buf++);
 	}
-
 	boot_page_write (p->current);	// Store buffer in flash page.
-	boot_spm_busy_wait();			// Wait until the memory is written.
+	
+}
 
+
+uint8_t programPageVerify(struct S_PAGE * p)
+{
+	uint16_t i;
+	uint16_t * buf;
 	// Reenable RWW-section again. 
 	// Verify would fail otherwise
 	boot_rww_enable ();
 	p->count = 0;
 
-/*	
 	// Verify memory content
 	buf = (uint16_t *) p->buffer;	
 	for (i=0; i<SPM_PAGESIZE; i+=2){
@@ -579,10 +637,9 @@ uint8_t programPage (struct S_PAGE * p)
 		if(b != *buf++)
 			break;
 	}
-	*/
-	memset(p->buffer,0xff,sizeof p->buffer);
+
 	if(i<SPM_PAGESIZE)
-		return FLASHERROR;
+		return VERIFYERROR;
 	else
 		return OK;
 }
