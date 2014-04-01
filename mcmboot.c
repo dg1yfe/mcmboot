@@ -243,12 +243,13 @@ int main(void)
 		
 		switch(blState){
 			case WAITPROMPT:
+				wait=100;
+			case PROMPT:
 				if(--wait)
 				{
 					_delay_ms(1);
 					break;
 				}				
-			case PROMPT:
 				blState = IDLE;
 				putStrP(PSTR("\r\nmcMega Bootloader v14_1 (dg1yfe / 2014).\r\nR - Erase\r\np - Program\r\nv - Verify\r\nb - Boot\r\n"));
 				break;				
@@ -264,7 +265,6 @@ int main(void)
 					}
 					else
 					if( c == 'R'){
-						putStrP(PSTR("\r\nErasing Program Memory...\r\n"));
 						blState = ERASE_PMEM;
 					}
 					else
@@ -338,24 +338,20 @@ int main(void)
 			case VERIFY_PAGE:
 				if (boot_spm_busy())
 					break;
-				putStrP(PSTR("0x"));
+				putStrP(PSTR("\r\n0x"));
+				putHex((uint8_t) (sPage.current >> 8));
+				putHex( (uint8_t) sPage.current);
 				
 				if(programPageVerify(&sPage) != OK){
-					putStrP(PSTR("\r\nVerify error at address 0x"));
 					memset(cBuf,0,sizeof cBuf);
-					putHex((uint8_t) (sPage.current >> 8));
-					putHex( (uint8_t) sPage.current);
-					putStrP(PSTR(".\r\n"));
-					wait=100;
+					putStrP(PSTR(" - Verify error.\r\n"));
 					blState = WAITPROMPT;
 					break;
 				}
 				else
 				{					
 					memset(cBuf,0,sizeof cBuf);
-					putHex((uint8_t) (sPage.current >> 8));
-					putHex( (uint8_t) sPage.current);
-					putStrP(PSTR(" Ok\r\n"));
+					putStrP(PSTR(" - Ok\r\n"));
 				}
 				
 				if(eof)
@@ -368,12 +364,10 @@ int main(void)
 				break;
 			case PROG_DONE:
 				putStrP(PSTR("\r\nProg & Verify ok.\r\n"));
-				wait=100;
 				blState = WAITPROMPT;
 				break;
 			case VERIFY_DONE:
 				putStrP(PSTR("\r\nData successfully verified.\r\n"));
-				wait=100;
 				blState = WAITPROMPT;
 				break;
 			case READ:
@@ -415,7 +409,7 @@ int main(void)
 					putChar('\n');
 				}
 				else{
-					wait=100;
+					putStrP(PSTR(":00000001FF"));	// End Of File record
 					blState = WAITPROMPT;
 				}
 				break;
@@ -423,7 +417,7 @@ int main(void)
 				break;
 			case ERASE_PMEM:
 				eraseProgramMemory();
-				putStrP(PSTR("...done\r\n"));
+				putStrP(PSTR("\r\nProgram memory erased.\r\n"));
 				wait=50;
 				blState=WAITPROMPT;
 				break;
