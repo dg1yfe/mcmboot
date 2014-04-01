@@ -4,7 +4,10 @@
  * Created: 26.03.2013 07:47:19
  *  Author: grandmaster
  */ 
+#ifndef F_CPU
 #define F_CPU 8000000UL
+#endif
+
 #define BOOTLOADER_BYTE_ADDRESS 0xF000U
 
 #include <stdlib.h>
@@ -48,7 +51,8 @@ uint16_t errorAtAddress = 0;
 uint8_t doBoot = 0;
 
 
-enum { IDLE=0, WAITPROMPT, PROMPT, PROGRAM, VERIFY, READ, PROCESSHEXDATA, PROGRAM_PAGE_EOF, VERIFY_PAGE_EOF, PROGRAM_PAGE, VERIFY_PAGE,
+enum { IDLE=0, WAITPROMPT, PROMPT, PROGRAM, VERIFY, READ, READ_DATA, SEND_DATA,
+		PROCESSHEXDATA, PROGRAM_PAGE_EOF, VERIFY_PAGE_EOF, PROGRAM_PAGE, VERIFY_PAGE,
 		PROG_DONE, VERIFY_DONE, ERASE_PMEM, BOOT };
 	
 enum { OK=0, PROCESSING, CHECKSUMERROR, FLASHERROR, VERIFYERROR, PROG_PAGE, EOF };
@@ -72,10 +76,9 @@ struct {
 struct S_PAGE{
 	uint8_t  buffer[SPM_PAGESIZE];
 	uint8_t  count;
-	uint8_t  startAddress;
+//	uint8_t  startAddress;
 	uint32_t current;
 	uint8_t  wp;
-	uint16_t flashAddress;
 } sPage;
 /*
 
@@ -86,16 +89,17 @@ struct S_PAGE{
 
 */
 
-void boot_program_page (uint32_t page, uint16_t *buf);
-
 void programPageBegin(struct S_PAGE * p);
 uint8_t programPageVerify (struct S_PAGE * p);
-uint8_t verifyPage (struct S_PAGE * p);
+
+void eraseProgramMemory (void);
+
 
 uint8_t iHexParser(uint8_t c);
 char getChar( );
 void putChar(char c);
 void putStrP(const char * c );
+void putHex(uint8_t u);
 
 void (*start)( void ) = 0x0000;        /* Funktionspointer auf 0x0000 */
 
@@ -215,7 +219,7 @@ int main(void)
     {		
 		doBoot = PINE & (1 << PINE4);	// read /PGM input
 		// if UART Tx Buf is empty and there is something to send
-		if((UCSR0A & (1<<UDRE0) && wbuf_count)){
+		if((UCSR0A & (1<<UDRE0)) && wbuf_count){
 			UDR0 = wbuf_data[wbuf_rp];
 			wbuf_rp++;
 			wbuf_rp &= WBUFMASK; 
@@ -331,11 +335,10 @@ int main(void)
 				errorAtAddress = 0;
 				
 				if(programPageVerify(&sPage) != OK){
-					uint8_t i=0;
 					putStrP(PSTR("\r\nVerify error at address 0x"));
 					memset(cBuf,0,sizeof cBuf);
-					itoa(sPage.current, cBuf, 16);
-					putStr(cBuf);
+					putHex((uint8_t) (sPage.current >> 8));
+					putHex( (uint8_t) sPage.current);
 					putStrP(PSTR(".\r\n"));
 					wait=100;
 					blState = WAITPROMPT;
@@ -345,8 +348,8 @@ int main(void)
 				{					
 					putStrP(PSTR("0x"));
 					memset(cBuf,0,sizeof cBuf);
-					itoa(sPage.current, cBuf, 16);
-					putStr(cBuf);
+					putHex((uint8_t) (sPage.current >> 8));
+					putHex( (uint8_t) sPage.current);
 					putStrP(PSTR(" Ok\r\n"));
 				}
 				
@@ -369,6 +372,49 @@ int main(void)
 				blState = WAITPROMPT;
 				break;
 			case READ:
+				sHexLine.address=0;
+				sHexLine.recordType = IHEX_DATA_RECORD;
+				break;
+			case READ_DATA:
+#define HEXLINEBYTECOUNT 16
+#define READ_ADDR_MAX 0xf000
+				if(wbuf_count)	// wait until write buffer is empty
+					break;
+				if(sHexLine.address <= READ_ADDR_MAX )
+				{
+					uint8_t i;
+					sHexLine.checksum = 0;
+					sHexLine.checksum-= (uint8_t) (sHexLine.address >> 8);
+					sHexLine.checksum-= (uint8_t) sHexLine.address & 0xff;
+					sHexLine.bytecount = 0;
+					for(i=0;i<HEXLINEBYTECOUNT;i++){
+						if(sHexLine.address + i >= READ_ADDR_MAX)
+							break;
+						sHexLine.data[i] = pgm_read_byte(sHexLine.address + i);
+						sHexLine.checksum -= sHexLine.data[i];
+						sHexLine.bytecount++;
+					}
+					sHexLine.checksum -= sHexLine.bytecount;
+					putChar(':');
+
+					putHex(sHexLine.bytecount);
+					putHex((uint8_t) (sHexLine.address >> 8));
+					putHex((uint8_t) sHexLine.address);
+					putChar('0');
+					putChar('0');
+					for(i=0;i < sHexLine.bytecount;i++){
+						putHex(sHexLine.data[i]);
+					}
+					putHex(sHexLine.checksum);
+					putChar('\r');
+					putChar('\n');
+				}
+				else{
+					wait=100;
+					blState = WAITPROMPT;
+				}
+				break;
+			case SEND_DATA:
 				break;
 			case ERASE_PMEM:
 				eraseProgramMemory();
@@ -441,7 +487,7 @@ uint8_t iHexParser(uint8_t c){
 				count = 4;
 				memset(cbuf,'0',sizeof cbuf);
 				HexParserState = BUFFER;
-			case BUFFER:
+		case BUFFER:
 			if(count){
 				cbuf[sizeof cbuf - count]=c;
 				if(--count==0){
@@ -523,13 +569,10 @@ uint8_t iHexParser(uint8_t c){
 				break;
 			}
 			else{
-				uint8_t i;
 				// Checksum ok, copy line data to page buffer
 				// if page buffer is full, program page
 				sPage.current = sHexLine.address & 0xff00;	// set address of new page
-				sPage.startAddress = (uint8_t) sHexLine.address;
 				sPage.wp = (uint8_t) sHexLine.address;
-				sPage.flashAddress = sHexLine.address;
 				// continue in state DATA_TO_PAGE
 			}
 		case DATA_TO_PAGE:
@@ -598,10 +641,19 @@ void putStrP(const char * s ){
 	}
 }
 
-void putStr(char * s ){
-	while(*s){
-		putChar(*s++);
-	}
+void putHex(uint8_t u){
+	char c;
+	if(wbuf_count >= WBUFSIZE-1)
+		return;
+
+	c = (char) ((u >> 4) > 9 ? (u >> 4) + 'a' - 10 : (u >> 4)+'0');
+	wbuf_data[wbuf_wp++] = c;
+	wbuf_wp &= WBUFMASK;
+	wbuf_count++;
+	c = (char) (u > 9 ? u + 'a' - 10 : u+'0');
+	wbuf_data[wbuf_wp++] = c;
+	wbuf_wp &= WBUFMASK;
+	wbuf_count++;
 }
 
 
@@ -645,33 +697,12 @@ uint8_t programPageVerify(struct S_PAGE * p)
 }
 
 
-uint8_t verifyPage (struct S_PAGE * p)
-{
-	uint16_t i;
-	uint16_t * buf;
-	uint8_t  rval=OK;
-
-	// Verify memory content
-	buf = (uint16_t *) p->buffer;	
-	for (i=0; i<SPM_PAGESIZE; i+=2){
-		uint16_t b;
-		b = pgm_read_word(p->current + i);
-		if(b != *buf++){
-			rval=VERIFYERROR;
-			errorAtAddress = (uint16_t) (p->current + i);
-			break;
-		}		
-	}
-}
-
-
-
 void erasePage (struct S_PAGE * p)
 {
 	boot_page_erase_safe (p->current);	
 }
 
-void eraseProgramMemory (struct S_PAGE * p)
+void eraseProgramMemory ()
 {
 	uint32_t page;
 	for (page=0; page < BOOTLOADER_BYTE_ADDRESS; page+=SPM_PAGESIZE){
