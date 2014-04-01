@@ -52,7 +52,7 @@ uint8_t doBoot = 0;
 
 
 enum { IDLE=0, WAITPROMPT, PROMPT, PROGRAM, VERIFY, READ, READ_DATA, SEND_DATA,
-		PROCESSHEXDATA, PROGRAM_PAGE_EOF, VERIFY_PAGE_EOF, PROGRAM_PAGE, VERIFY_PAGE,
+		PROCESSHEXDATA, ERASE_PAGE, PROGRAM_PAGE, VERIFY_PAGE,
 		PROG_DONE, VERIFY_DONE, ERASE_PMEM, BOOT };
 	
 enum { OK=0, PROCESSING, CHECKSUMERROR, FLASHERROR, VERIFYERROR, PROG_PAGE, EOF };
@@ -60,6 +60,7 @@ enum { OK=0, PROCESSING, CHECKSUMERROR, FLASHERROR, VERIFYERROR, PROG_PAGE, EOF 
 enum { IHEX_DATA_RECORD=0, IHEX_EOF_RECORD};
 
 uint8_t mode = PROGRAM;
+uint8_t eof = 0;
 uint8_t blState = PROMPT;
 uint8_t wait = 0;
 
@@ -91,9 +92,9 @@ struct S_PAGE{
 
 void programPageBegin(struct S_PAGE * p);
 uint8_t programPageVerify (struct S_PAGE * p);
+void erasePage (struct S_PAGE * p);
 
 void eraseProgramMemory (void);
-
 
 uint8_t iHexParser(uint8_t c);
 char getChar( );
@@ -271,6 +272,7 @@ int main(void)
 						blState = READ;
 					}
 					if( (c == 'p') || (c == 'v') ){
+						eof = 0;
 						putStrP(PSTR("Send Hex File... (ESC to abort)\r\n"));
 					}						
 				}
@@ -289,50 +291,54 @@ int main(void)
 				char c;
 				if((c = getChar())){
 					uint8_t err;
+					// check for ESCAPE
 					if(c==0x1b){
 						putStrP(PSTR("ESC\r\n"));
+						// abort
 						blState = PROMPT;
 					}
+					// send char to iHex Parser
 					err = iHexParser(c);
 					
-					if(err == PROG_PAGE){
-						if(mode==VERIFY)						
-							blState = VERIFY_PAGE;
-						else
-							blState = PROGRAM_PAGE;
-					}
-					else
+					// evaluate return state
 					if(err==EOF){
+						// end of file received
+						eof = 1;
+						// program last page
 						if (sPage.wp){
-							if(mode==VERIFY)
-								blState = VERIFY_PAGE_EOF;
-							else
-								blState = PROGRAM_PAGE_EOF;
+							err = ERASE_PAGE;
 						}
 						else{
 							blState = PROG_DONE;						
 						}
 					}
+					if(err == PROG_PAGE){
+						if(mode==VERIFY)
+							blState = VERIFY_PAGE;
+						else
+							blState = ERASE_PAGE;
+					}
 				}
 				break;
 			}
-			case PROGRAM_PAGE_EOF:			
+			case ERASE_PAGE:
+				if (boot_spm_busy())
+					break;
+				erasePage(&sPage);
+				blState = PROGRAM_PAGE;
+				break;
 			case PROGRAM_PAGE:
 				if (boot_spm_busy())
 					break;
 					
 				programPageBegin(&sPage);
 				
-				if(blState == PROGRAM_PAGE)
-					blState = VERIFY_PAGE;
-				else
-					blState = VERIFY_PAGE_EOF;
+				blState = VERIFY_PAGE;
 				break;
-			case VERIFY_PAGE_EOF:
 			case VERIFY_PAGE:
 				if (boot_spm_busy())
 					break;
-				errorAtAddress = 0;
+				putStrP(PSTR("0x"));
 				
 				if(programPageVerify(&sPage) != OK){
 					putStrP(PSTR("\r\nVerify error at address 0x"));
@@ -346,14 +352,13 @@ int main(void)
 				}
 				else
 				{					
-					putStrP(PSTR("0x"));
 					memset(cBuf,0,sizeof cBuf);
 					putHex((uint8_t) (sPage.current >> 8));
 					putHex( (uint8_t) sPage.current);
 					putStrP(PSTR(" Ok\r\n"));
 				}
 				
-				if(blState==VERIFY_PAGE_EOF)
+				if(eof)
 				{
 					blState = PROG_DONE;
 				}
@@ -699,7 +704,7 @@ uint8_t programPageVerify(struct S_PAGE * p)
 
 void erasePage (struct S_PAGE * p)
 {
-	boot_page_erase_safe (p->current);	
+	boot_page_erase (p->current);
 }
 
 void eraseProgramMemory ()
