@@ -53,7 +53,7 @@ uint8_t doBoot = 0;
 
 enum { IDLE=0, WAITPROMPT, PROMPT, PROGRAM, VERIFY, READ, READ_DATA, SEND_DATA,
 		PROCESSHEXDATA, ERASE_PAGE, PROGRAM_PAGE, VERIFY_PAGE,
-		PROG_DONE, VERIFY_DONE, ERASE_PMEM, BOOT };
+		PROG_DONE, ERASE_PMEM, DO_ERASE_PMEM, BOOT, IGNORELINE };
 	
 enum { OK=0, PROCESSING, CHECKSUMERROR, FLASHERROR, VERIFYERROR, PROG_PAGE, EOF };
 		
@@ -243,19 +243,20 @@ int main(void)
 		
 		switch(blState){
 			case WAITPROMPT:
-				wait=100;
-			case PROMPT:
-				if(--wait)
-				{
-					_delay_ms(1);
+				if(wbuf_count)	// wait until write buffer is empty
 					break;
-				}				
+				_delay_ms(500);
+				
+			case PROMPT:
 				blState = IDLE;
-				putStrP(PSTR("\r\nmcMega Bootloader v14_1 (dg1yfe / 2014).\r\nR - Erase\r\np - Program\r\nv - Verify\r\nb - Boot\r\n"));
+				putStrP(PSTR("\r\n: mcMega Bootloader v14_1 (dg1yfe / 2014).\r\n: X - Erase\r\n: p - Program\r\n: v - Verify\r\n: r - Read\r\n: b - Boot\r\n"));
 				break;				
 			case IDLE:{
 				char c;
 				if((c = getChar())){
+					if( c == ':'){
+						blState = IGNORELINE;
+					}
 					if( c == 'p'){
 						blState = PROGRAM;						
 					}
@@ -264,12 +265,16 @@ int main(void)
 						blState = VERIFY;
 					}
 					else
-					if( c == 'R'){
+					if( c == 'X'){
 						blState = ERASE_PMEM;
 					}
 					else
 					if (c == 'r'){
 						blState = READ;
+					}
+					else
+					if (c == 'b'){
+						blState = BOOT;
 					}
 					if( (c == 'p') || (c == 'v') ){
 						eof = 0;
@@ -294,24 +299,35 @@ int main(void)
 					// check for ESCAPE
 					if(c==0x1b){
 						putStrP(PSTR("ESC\r\n"));
+						eof=2;
 						// abort
-						blState = PROMPT;
+						blState = PROG_DONE;
+						// no break here, Hex Parser needs to abort as well
 					}
 					// send char to iHex Parser
 					err = iHexParser(c);
 					
 					// evaluate return state
-					if(err==EOF){
-						// end of file received
+					if(err==EOF || err == CHECKSUMERROR){
+						// end of file received (or line checksum error)
 						eof = 1;
+						// treat line checksum error and EOF the same way
+						if(err == CHECKSUMERROR){
+							eof++;
+							// give error message on checksum error
+							putStrP(PSTR("Line Checksum Error near address: 0x"));
+							putHex(sHexLine.address >> 8);
+							putHex(sHexLine.address & 0xff);						
+						}
 						// program last page
 						if (sPage.wp){
-							err = ERASE_PAGE;
+							blState = ERASE_PAGE;
 						}
 						else{
 							blState = PROG_DONE;						
 						}
 					}
+					
 					if(err == PROG_PAGE){
 						if(mode==VERIFY)
 							blState = VERIFY_PAGE;
@@ -344,14 +360,14 @@ int main(void)
 				
 				if(programPageVerify(&sPage) != OK){
 					memset(cBuf,0,sizeof cBuf);
-					putStrP(PSTR(" - Verify error.\r\n"));
+					putStrP(PSTR(" - Verify error."));
 					blState = WAITPROMPT;
 					break;
 				}
 				else
 				{					
 					memset(cBuf,0,sizeof cBuf);
-					putStrP(PSTR(" - Ok\r\n"));
+					putStrP(PSTR(" - Ok"));
 				}
 				
 				if(eof)
@@ -363,23 +379,32 @@ int main(void)
 				}
 				break;
 			case PROG_DONE:
-				putStrP(PSTR("\r\nProg & Verify ok.\r\n"));
-				blState = WAITPROMPT;
-				break;
-			case VERIFY_DONE:
-				putStrP(PSTR("\r\nData successfully verified.\r\n"));
+				putStrP(PSTR("\r\nProg / Verify "));
+				// check for abort
+				if(eof == 2)
+					putStrP(PSTR("aborted.\r\n"));
+				else
+					putStrP(PSTR("ok.\r\n"));
 				blState = WAITPROMPT;
 				break;
 			case READ:
-				sHexLine.address=0;
+				sHexLine.address=0x0000;
 				sHexLine.recordType = IHEX_DATA_RECORD;
+				blState = READ_DATA;
 				break;
 			case READ_DATA:
 #define HEXLINEBYTECOUNT 16
 #define READ_ADDR_MAX 0xf000
+				if(getChar() == 0x1b){
+					putStrP(PSTR("ESC\r\n"));
+					// abort
+					blState = WAITPROMPT;
+				}				
+
 				if(wbuf_count)	// wait until write buffer is empty
 					break;
-				if(sHexLine.address <= READ_ADDR_MAX )
+					
+				if(sHexLine.address < READ_ADDR_MAX )
 				{
 					uint8_t i;
 					sHexLine.checksum = 0;
@@ -394,17 +419,19 @@ int main(void)
 						sHexLine.bytecount++;
 					}
 					sHexLine.checksum -= sHexLine.bytecount;
-					putChar(':');
-
-					putHex(sHexLine.bytecount);
-					putHex((uint8_t) (sHexLine.address >> 8));
+					putChar(':');	// start of line
+					putHex(sHexLine.bytecount);	// followed by bytecount (number of bytes in data part of line)
+					putHex((uint8_t) (sHexLine.address >> 8));	// followed by 2 Byte address
 					putHex((uint8_t) sHexLine.address);
+
+					sHexLine.address += i;
+
+					putChar('0');	// Followed by record type - "00" = This is a data record
 					putChar('0');
-					putChar('0');
-					for(i=0;i < sHexLine.bytecount;i++){
+					for(i=0;i < sHexLine.bytecount;i++){	// write actual data
 						putHex(sHexLine.data[i]);
 					}
-					putHex(sHexLine.checksum);
+					putHex(sHexLine.checksum);	// last item is the line checksum
 					putChar('\r');
 					putChar('\n');
 				}
@@ -416,14 +443,28 @@ int main(void)
 			case SEND_DATA:
 				break;
 			case ERASE_PMEM:
+				putStrP(PSTR("Erasing program memory...\r\n"));
+				blState = DO_ERASE_PMEM;
+				break;
+			case DO_ERASE_PMEM:
+				if(wbuf_count)	// wait until write buffer is empty
+					break;
 				eraseProgramMemory();
-				putStrP(PSTR("\r\nProgram memory erased.\r\n"));
-				wait=50;
+				putStrP(PSTR("...done.\r\n"));
 				blState=WAITPROMPT;
 				break;
 			case BOOT:
 				doBoot = 1;
 				break;
+			case IGNORELINE:{
+				uint8_t c;
+				// ignore all chars until LF or CR is received
+				if((c = getChar()) && ( c == '\n' || c == '\r')){
+					// abort
+					blState = IDLE;
+				}
+				break;
+			}						
 		}
     }
 	start();
@@ -649,7 +690,8 @@ void putHex(uint8_t u){
 	wbuf_data[wbuf_wp++] = c;
 	wbuf_wp &= WBUFMASK;
 	wbuf_count++;
-	c = (char) (u > 9 ? u + 'a' - 10 : u+'0');
+	u &= 0xf;
+	c = (char) ( u > 9 ? u + 'a' - 10 : u+'0');
 	wbuf_data[wbuf_wp++] = c;
 	wbuf_wp &= WBUFMASK;
 	wbuf_count++;
