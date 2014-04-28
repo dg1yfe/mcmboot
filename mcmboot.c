@@ -63,6 +63,7 @@ uint8_t mode = PROGRAM;
 uint8_t eof = 0;
 uint8_t blState = PROMPT;
 uint8_t wait = 0;
+int16_t noprompt = 0;
 
 struct {
 	uint8_t		bytecount;
@@ -258,17 +259,29 @@ int main(void)
 					_delay_ms(10);
 					resetWatchdog();
 				}
+				noprompt=0;
 			}			
 			case PROMPT:
 				blState = IDLE;
-				putStrP(PSTR("\r\n: mcMega Bootloader v14_1 (dg1yfe / 2014).\r\n: X - Erase\r\n: p - Program\r\n: v - Verify\r\n: r - Read\r\n: b - Boot\r\n"));
+				// try to avoid multiple consecutive prompts which could overflow the TX ringbuffer
+				if(!noprompt)
+					putStrP(PSTR("\r\n: mcMega Bootloader v14_1 (dg1yfe / 2014).\r\n: X - Erase\r\n: p - Program\r\n: v - Verify\r\n: r - Read\r\n: b - Boot\r\n"));
+				noprompt = -1;
 				break;				
 			case IDLE:{
 				char c;
+				if(noprompt)
+					noprompt--;
 				if((c = getChar())){
 					if( c == ':'){
 						blState = IGNORELINE;
+						break;
 					}
+					if( c == '\r'){
+						blState = PROMPT;
+						break;
+					}
+					
 					if( c == 'p'){
 						blState = PROGRAM;						
 					}
@@ -288,6 +301,7 @@ int main(void)
 					if (c == 'b'){
 						blState = BOOT;
 					}
+					
 					if( (c == 'p') || (c == 'v') ){
 						eof = 0;
 						putStrP(PSTR("Send Hex File... (ESC to abort)\r\n"));
