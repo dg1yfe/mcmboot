@@ -101,6 +101,8 @@ char getChar( );
 void putChar(char c);
 void putStrP(const char * c );
 void putHex(uint8_t u);
+void resetWatchdog();
+
 
 void (*start)( void ) = 0x0000;        /* Funktionspointer auf 0x0000 */
 
@@ -143,14 +145,14 @@ int main(void)
 	 * Bit 0	: SWB+
 	 * Bit 1	: PTT (input)
 	 * Bit 2-3	: UART1
-	 * Bit 4	: Signalling Decode (IC1)
+	 * Bit 4	: Signaling Decode (IC1)
 	 * Bit 5	: Clock
 	 * Bit 6	: Data out
 	 * Bit 7	: DPTT
 	 */
-	// leave Bit 6 low & input
-	// only use PORTE2 as data i/o
-	DDRD  = ( 1 << 5) | ( 0 << 6 ) | ( 1 << 7 );
+	// Configure Data, Clock and DPTT as outputs
+	// 
+	DDRD  = ( 1 << 5) | ( 1 << 6 ) | ( 1 << 7 );
 	PORTD = ( 0 << 5) | ( 0 << 6);
 
 	/*
@@ -179,6 +181,8 @@ int main(void)
 	PORTG = (1 << 4);
 	DDRG  = (1 << 3) | (1 << 4);
 
+	resetWatchdog();
+	
 // configure UART and check communication    
 
 	UBRR0H = UART_HIDIV;
@@ -219,6 +223,9 @@ int main(void)
 	while(!doBoot)
     {		
 		doBoot = PINE & (1 << PINE4);	// read /PGM input
+	
+		resetWatchdog();
+
 		// if UART Tx Buf is empty and there is something to send
 		if((UCSR0A & (1<<UDRE0)) && wbuf_count){
 			UDR0 = wbuf_data[wbuf_rp];
@@ -243,10 +250,15 @@ int main(void)
 		
 		switch(blState){
 			case WAITPROMPT:
+			{
+				uint8_t i;
 				if(wbuf_count)	// wait until write buffer is empty
 					break;
-				_delay_ms(500);
-				
+				for(i=0;i<50;i++){
+					_delay_ms(10);
+					resetWatchdog();
+				}
+			}			
 			case PROMPT:
 				blState = IDLE;
 				putStrP(PSTR("\r\n: mcMega Bootloader v14_1 (dg1yfe / 2014).\r\n: X - Erase\r\n: p - Program\r\n: v - Verify\r\n: r - Read\r\n: b - Boot\r\n"));
@@ -705,10 +717,13 @@ void programPageBegin(struct S_PAGE * p)
 
 	buf = (uint16_t *) p->buffer;
 //	boot_page_erase (p->current);
+//	resetWatchdog();
 	for (i=0; i<SPM_PAGESIZE; i+=2){
 		boot_page_fill (p->current + i, *buf++);
 	}
+	resetWatchdog();
 	boot_page_write (p->current);	// Store buffer in flash page.
+	resetWatchdog();
 	
 }
 
@@ -740,16 +755,33 @@ uint8_t programPageVerify(struct S_PAGE * p)
 
 void erasePage (struct S_PAGE * p)
 {
+	resetWatchdog();
 	boot_page_erase (p->current);
+	resetWatchdog();
 }
 
 void eraseProgramMemory ()
 {
 	uint32_t page;
 	for (page=0; page < BOOTLOADER_BYTE_ADDRESS; page+=SPM_PAGESIZE){
-		boot_page_erase_safe(page);
+// This is	"boot_page_erase_safe(page);" but includes Watchdog reset
+		do
+		{
+			resetWatchdog();
+		}while(boot_spm_busy() || (!eeprom_is_ready()));
+		boot_page_erase (page);		
 	}
-	boot_spm_busy_wait();
+	
+	do
+	{
+		resetWatchdog();
+	}while(boot_spm_busy());
 	boot_rww_enable ();
 }
 	
+
+void resetWatchdog()
+{
+	// toggle PortD, Bit 6
+	PORTD ^= (1 << 6);	
+}
