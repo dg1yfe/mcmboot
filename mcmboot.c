@@ -71,17 +71,17 @@ uint16_t errorAtAddress = 0;
 uint8_t doBoot = 0;
 
 
-enum { IDLE=0, WAITPROMPT, PROMPT, PROGRAM, VERIFY, READ, READ_DATA, SEND_DATA,
-		PROCESSHEXDATA, ERASE_PAGE, PROGRAM_PAGE, VERIFY_PAGE,
-		PROG_DONE, ERASE_PMEM, DO_ERASE_PMEM, BOOT, IGNORELINE };
+enum { BL_IDLE=0, BL_WAITPROMPT, BL_PROMPT, BL_PROGRAM, BL_VERIFY, BL_READ, BL_READ_DATA, BL_SEND_DATA,
+		BL_PROCESSHEXDATA, BL_ERASE_PAGE, BL_PROGRAM_PAGE, BL_VERIFY_PAGE,
+		BL_PROG_DONE, BL_ERASE_PMEM, BL_DO_ERASE_PMEM, BL_BOOT, BL_IGNORELINE };
 	
 enum { OK=0, PROCESSING, CHECKSUMERROR, FLASHERROR, VERIFYERROR, PROG_PAGE, EOF };
 		
 enum { IHEX_DATA_RECORD=0, IHEX_EOF_RECORD};
 
-uint8_t mode = PROGRAM;
+uint8_t mode = BL_PROGRAM;
 uint8_t eof = 0;
-uint8_t blState = PROMPT;
+uint8_t blState = BL_PROMPT;
 uint8_t wait = 0;
 int16_t noprompt = 0;
 
@@ -229,7 +229,7 @@ int main(void)
 	sPage.wp = 0;
 	memset(sPage.buffer, 0xff , sizeof sPage.buffer);
 	
-	blState = PROMPT;
+	blState = BL_PROMPT;
 //#if F_CPU
 	TCCR1B = (( 1 << CS12 ) | (1 << CS10));		// Prescaler 1024
 	TCNT1  = 0;
@@ -270,7 +270,7 @@ int main(void)
 		}
 		
 		switch(blState){
-			case WAITPROMPT:
+			case BL_WAITPROMPT:
 			{
 				uint8_t i;
 				if(wbuf_count)	// wait until write buffer is empty
@@ -281,45 +281,46 @@ int main(void)
 				}
 				noprompt=0;
 			}			
-			case PROMPT:
-				blState = IDLE;
+			//no break;
+			case BL_PROMPT:
+				blState = BL_IDLE;
 				// try to avoid multiple consecutive prompts which could overflow the TX ringbuffer
 				if(!noprompt)
 					putStrP(PSTR("\r\n: mcMega Bootloader v14_1 (dg1yfe / 2014).\r\n: X - Erase\r\n: p - Program\r\n: v - Verify\r\n: r - Read\r\n: b - Boot\r\n"));
 				noprompt = -1;
 				break;				
-			case IDLE:{
+			case BL_IDLE:{
 				char c;
 				if(noprompt)
 					noprompt--;
 				if((c = getChar())){
 					if( c == ':'){
-						blState = IGNORELINE;
+						blState = BL_IGNORELINE;
 						break;
 					}
 					if( c == '\r'){
-						blState = PROMPT;
+						blState = BL_PROMPT;
 						break;
 					}
 					
 					if( c == 'p'){
-						blState = PROGRAM;						
+						blState = BL_PROGRAM;
 					}
 					else
 					if( c == 'v'){
-						blState = VERIFY;
+						blState = BL_VERIFY;
 					}
 					else
 					if( c == 'X'){
-						blState = ERASE_PMEM;
+						blState = BL_ERASE_PMEM;
 					}
 					else
 					if (c == 'r'){
-						blState = READ;
+						blState = BL_READ;
 					}
 					else
 					if (c == 'b'){
-						blState = BOOT;
+						blState = BL_BOOT;
 					}
 					
 					if( (c == 'p') || (c == 'v') ){
@@ -329,15 +330,15 @@ int main(void)
 				}
 				break;
 			}			
-			case PROGRAM:
-				mode = PROGRAM;
-				blState=PROCESSHEXDATA;
+			case BL_PROGRAM:
+				mode = BL_PROGRAM;
+				blState=BL_PROCESSHEXDATA;
 				break;
-			case VERIFY:
-				mode = VERIFY;
-				blState=PROCESSHEXDATA;
+			case BL_VERIFY:
+				mode = BL_VERIFY;
+				blState=BL_PROCESSHEXDATA;
 				break;
-			case PROCESSHEXDATA:
+			case BL_PROCESSHEXDATA:
 			{
 				char c;
 				if((c = getChar())){
@@ -347,7 +348,7 @@ int main(void)
 						putStrP(PSTR("ESC\r\n"));
 						eof=2;
 						// abort
-						blState = PROG_DONE;
+						blState = BL_PROG_DONE;
 						// no break here, Hex Parser needs to abort as well
 					}
 					// send char to iHex Parser
@@ -367,37 +368,37 @@ int main(void)
 						}
 						// program last page
 						if (sPage.wp){
-							blState = ERASE_PAGE;
+							blState = BL_ERASE_PAGE;
 						}
 						else{
-							blState = PROG_DONE;						
+							blState = BL_PROG_DONE;
 						}
 					}
 					
 					if(err == PROG_PAGE){
-						if(mode==VERIFY)
-							blState = VERIFY_PAGE;
+						if(mode==BL_VERIFY)
+							blState = BL_VERIFY_PAGE;
 						else
-							blState = ERASE_PAGE;
+							blState = BL_ERASE_PAGE;
 					}
 				}
 				break;
 			}
-			case ERASE_PAGE:
+			case BL_ERASE_PAGE:
 				if (boot_spm_busy())
 					break;
 				erasePage(&sPage);
-				blState = PROGRAM_PAGE;
+				blState = BL_PROGRAM_PAGE;
 				break;
-			case PROGRAM_PAGE:
+			case BL_PROGRAM_PAGE:
 				if (boot_spm_busy())
 					break;
 					
 				programPageBegin(&sPage);
 				
-				blState = VERIFY_PAGE;
+				blState = BL_VERIFY_PAGE;
 				break;
-			case VERIFY_PAGE:
+			case BL_VERIFY_PAGE:
 				if (boot_spm_busy())
 					break;
 				putStrP(PSTR("\r\n0x"));
@@ -407,7 +408,7 @@ int main(void)
 				if(programPageVerify(&sPage) != OK){
 					memset(cBuf,0,sizeof cBuf);
 					putStrP(PSTR(" - Verify error."));
-					blState = WAITPROMPT;
+					blState = BL_WAITPROMPT;
 					break;
 				}
 				else
@@ -418,33 +419,33 @@ int main(void)
 				
 				if(eof)
 				{
-					blState = PROG_DONE;
+					blState = BL_PROG_DONE;
 				}
 				else{
-					blState = PROCESSHEXDATA;					
+					blState = BL_PROCESSHEXDATA;
 				}
 				break;
-			case PROG_DONE:
+			case BL_PROG_DONE:
 				putStrP(PSTR("\r\nProg / Verify "));
 				// check for abort
 				if(eof == 2)
 					putStrP(PSTR("aborted.\r\n"));
 				else
 					putStrP(PSTR("ok.\r\n"));
-				blState = WAITPROMPT;
+				blState = BL_WAITPROMPT;
 				break;
-			case READ:
+			case BL_READ:
 				sHexLine.address=0x0000;
 				sHexLine.recordType = IHEX_DATA_RECORD;
-				blState = READ_DATA;
+				blState = BL_READ_DATA;
 				break;
-			case READ_DATA:
+			case BL_READ_DATA:
 #define HEXLINEBYTECOUNT 16
 #define READ_ADDR_MAX 0xf000
 				if(getChar() == 0x1b){
 					putStrP(PSTR("ESC\r\n"));
 					// abort
-					blState = WAITPROMPT;
+					blState = BL_WAITPROMPT;
 				}				
 
 				if(wbuf_count)	// wait until write buffer is empty
@@ -483,31 +484,31 @@ int main(void)
 				}
 				else{
 					putStrP(PSTR(":00000001FF"));	// End Of File record
-					blState = WAITPROMPT;
+					blState = BL_WAITPROMPT;
 				}
 				break;
-			case SEND_DATA:
+			case BL_SEND_DATA:
 				break;
-			case ERASE_PMEM:
+			case BL_ERASE_PMEM:
 				putStrP(PSTR("Erasing program memory...\r\n"));
-				blState = DO_ERASE_PMEM;
+				blState = BL_DO_ERASE_PMEM;
 				break;
-			case DO_ERASE_PMEM:
+			case BL_DO_ERASE_PMEM:
 				if(wbuf_count)	// wait until write buffer is empty
 					break;
 				eraseProgramMemory();
 				putStrP(PSTR("...done.\r\n"));
-				blState=WAITPROMPT;
+				blState=BL_WAITPROMPT;
 				break;
-			case BOOT:
+			case BL_BOOT:
 				doBoot = 1;
 				break;
-			case IGNORELINE:{
+			case BL_IGNORELINE:{
 				uint8_t c;
 				// ignore all chars until LF or CR is received
 				if((c = getChar()) && ( c == '\n' || c == '\r')){
 					// abort
-					blState = IDLE;
+					blState = BL_IDLE;
 				}
 				break;
 			}						
@@ -573,6 +574,7 @@ uint8_t iHexParser(uint8_t c){
 				count = 4;
 				memset(cbuf,'0',sizeof cbuf);
 				HexParserState = BUFFER;
+				// no break
 		case BUFFER:
 			if(count){
 				cbuf[sizeof cbuf - count]=c;
@@ -661,6 +663,7 @@ uint8_t iHexParser(uint8_t c){
 				sPage.wp = (uint8_t) sHexLine.address;
 				// continue in state DATA_TO_PAGE
 			}
+			// no break
 		case DATA_TO_PAGE:
 			i=sHexLine.offset;
 			while(i<sHexLine.bytecount && ((sPage.wp) || (!sPage.count))){
