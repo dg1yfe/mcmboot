@@ -125,12 +125,11 @@ void putStrP(const char * c );
 void putHex(uint8_t u);
 void resetWatchdog();
 
-
-void (*start)( void ) = 0x0000;        /* Funktionspointer auf 0x0000 */
-
-int main(void) __attribute__((noreturn));
+int main(void) __attribute__((OS_main));
 int main(void)
 {
+	/* Pointer to main program reset vector at 0x0000 */
+	void (*start)( void ) = 0;
 	char cBuf[8];
 
 // configure io Pins
@@ -266,7 +265,9 @@ int main(void)
 			}
 			else
 			{	// Buffer is full, read data anyway, but discard
-				volatile uint8_t dummy = UDR0;
+				// mark dummy as unused to avoid issuing a compiler warning
+				volatile uint8_t dummy __attribute__((unused));
+				dummy = UDR0;
 			}
 		}
 		
@@ -516,6 +517,7 @@ int main(void)
 		}
     }
 	start();
+	for(;;);
 }
 
 
