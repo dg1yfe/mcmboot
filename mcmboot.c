@@ -26,6 +26,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */ 
 #ifndef F_CPU
 #define F_CPU 8000000UL
+#warning "F_CPU not defined, setting to 8 MHz"
 #endif
 
 #define BOOTLOADER_BYTE_ADDRESS 0xF000U
